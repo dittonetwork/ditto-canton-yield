@@ -29,38 +29,35 @@ Ditto Vault operates across two execution environments connected by a backend or
 
 The Canton side never touches actual funds in the MVP. It tracks NAV, manages vault shares (dvUSDC), and provides institutional-grade workflows. The EVM side is the existing yield engine. A backend service bridges state between the two.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Canton Network (Daml)                        │
-│                                                                     │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────────┐ │
-│  │  VaultState   │  │  dvUSDC      │  │  DepositOffer /           │ │
-│  │  NAV, shares, │  │  CIP-56      │  │  WithdrawRequest /        │ │
-│  │  sharePrice   │  │  Holdings    │  │  YieldClaim               │ │
-│  └──────┬───────┘  └──────┬───────┘  └────────────┬──────────────┘ │
-│         │                 │                        │                │
-│         └─────────────────┼────────────────────────┘                │
-│                           │                                         │
-│                    JSON Ledger API                                   │
-└───────────────────────────┼─────────────────────────────────────────┘
-                            │
-                 ┌──────────┴──────────┐
-                 │  Backend Services    │
-                 │                      │
-                 │  • Lifecycle Bot     │
-                 │  • NAV Oracle        │
-                 │  • LP Market Maker   │
-                 └──────────┬──────────┘
-                            │
-              ┌─────────────┴─────────────┐
-              │  EVM Yield Engine          │
-              │                            │
-              │  Aave · Morpho · Fluid ·   │
-              │  Spark                     │
-              │                            │
-              │  Secured by 16 Ditto       │
-              │  operators ($200M+ TVL)    │
-              └────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Canton["Canton Network (Daml)"]
+        VS["VaultState\nNAV, shares, sharePrice"]
+        DV["dvUSDC\nCIP-56 Holdings"]
+        WF["DepositOffer /\nWithdrawRequest /\nYieldClaim"]
+    end
+
+    subgraph Backend["Backend Services"]
+        LB["Lifecycle Bot"]
+        NO["NAV Oracle"]
+        LP["LP Market Maker"]
+        UM["UTXO Manager"]
+    end
+
+    subgraph EVM["EVM Yield Engine"]
+        direction LR
+        Aave
+        Morpho
+        Fluid
+        Spark
+    end
+
+    Canton <-->|"JSON Ledger API"| Backend
+    Backend <-->|"RPC / Web3"| EVM
+
+    style Canton fill:#0d1117,stroke:#7ae99d,color:#fff
+    style Backend fill:#0d1117,stroke:#4dabf7,color:#fff
+    style EVM fill:#0d1117,stroke:#ffb84d,color:#fff
 ```
 
 ---
@@ -264,38 +261,34 @@ Description      : Ditto Vault yield-bearing USDC token
 
 ### 3.3 Minting (on deposit)
 
-```
-User creates DepositOffer
-  → Operator calls BurnMintFactory_BurnMint
-    → action = Mint
-    → owner  = depositor party
-    → amount = depositAmount / sharePrice
-  → New Holding contract created for depositor
-  → Activity marker generated (MintOffer_Accept)
+```mermaid
+flowchart LR
+    A["User creates\nDepositOffer"] --> B["Operator calls\nBurnMintFactory_BurnMint"]
+    B --> C["action = Mint\nowner = depositor\namount = depositAmount / sharePrice"]
+    C --> D["New Holding\ncreated for depositor"]
+    D --> E["Activity marker\n(MintOffer_Accept)"]
 ```
 
 ### 3.4 Burning (on withdrawal)
 
-```
-User creates WithdrawRequest
-  → Operator fetches user's dvUSDC Holdings via HoldingV1 interface
-  → Operator calls BurnMintFactory_BurnMint
-    → action = Burn
-    → holdings = user's dvUSDC holding contract IDs
-    → amount = sharesToBurn
-  → Holding contracts consumed
-  → Activity marker generated (BurnOffer_Accept)
+```mermaid
+flowchart LR
+    A["User creates\nWithdrawRequest"] --> B["Operator fetches Holdings\nvia HoldingV1 interface"]
+    B --> C["Operator calls\nBurnMintFactory_BurnMint"]
+    C --> D["action = Burn\nholdings = user's contract IDs\namount = sharesToBurn"]
+    D --> E["Holdings consumed"]
+    E --> F["Activity marker\n(BurnOffer_Accept)"]
 ```
 
 ### 3.5 Transfers
 
 Standard CIP-56 peer-to-peer transfers via `TransferFactory_Transfer`:
 
-```
-Sender creates TransferInstruction
-  → Receiver accepts
-  → Sender's Holding consumed, new Holding created for receiver
-  → Activity marker generated (TransferInstruction_Accept)
+```mermaid
+flowchart LR
+    A["Sender creates\nTransferInstruction"] --> B["Receiver\naccepts"]
+    B --> C["Sender's Holding consumed\nNew Holding for receiver"]
+    C --> D["Activity marker\n(TransferInstruction_Accept)"]
 ```
 
 ### 3.6 Holdings (UTXO Model)
@@ -312,12 +305,14 @@ CIP-56 holdings follow a UTXO model. Each mint creates a new holding contract. M
 
 ### 4.1 NAV Update Flow
 
-```
-┌──────────────────┐         ┌──────────────────┐        ┌────────────────┐
-│  EVM Yield Engine │         │  NAV Oracle       │        │  VaultState    │
-│  (Aave, Morpho,  │◄────────│  (Backend)        │───────►│  (Canton)      │
-│   Fluid, Spark)  │  read   │                    │ write  │                │
-└──────────────────┘  TVL    └──────────────────┘        └────────────────┘
+```mermaid
+flowchart LR
+    EVM["EVM Yield Engine\n(Aave, Morpho, Fluid, Spark)"]
+    NAV["NAV Oracle\n(Backend)"]
+    VS["VaultState\n(Canton)"]
+
+    EVM -->|"read TVL\ntotalAssets()"| NAV
+    NAV -->|"exercise UpdateNAV\npost netNAV"| VS
 ```
 
 1. NAV Oracle reads total vault value from EVM vault contracts via RPC
@@ -364,82 +359,94 @@ netNAV        = grossNAV - accruedFee
 
 ### 5.1 Deposit Flow
 
-```
-User                    Frontend              Backend (Operator)           Canton
- │                         │                         │                       │
- │── deposit(amount) ─────►│                         │                       │
- │                         │── create DepositOffer ─►│                       │
- │                         │                         │── create DepositOffer ►│
- │                         │                         │                       │
- │                         │                         │◄── DepositOffer cid ───│
- │                         │                         │                       │
- │                         │                         │── read VaultState ────►│
- │                         │                         │◄── sharePrice ────────│
- │                         │                         │                       │
- │                         │                         │   shares = amount /    │
- │                         │                         │           sharePrice   │
- │                         │                         │                       │
- │                         │                         │── ATOMIC TRANSACTION: │
- │                         │                         │   1. AcceptDeposit    │
- │                         │                         │   2. BurnMintFactory  │
- │                         │                         │      Mint(shares)     │
- │                         │                         │   3. RecordMint       │
- │                         │                         │──────────────────────►│
- │                         │                         │                       │
- │                         │                         │◄── Holding(dvUSDC) ───│
- │◄── confirmation ────────│◄── tx result ──────────│                       │
+```mermaid
+sequenceDiagram
+    actor User
+    participant FE as Frontend
+    participant BE as Backend (Operator)
+    participant CN as Canton Ledger
+
+    User->>FE: deposit(amount)
+    FE->>CN: create DepositOffer
+    CN-->>BE: DepositOffer contract active
+
+    BE->>CN: read VaultState
+    CN-->>BE: sharePrice
+
+    Note over BE: shares = amount / sharePrice
+
+    rect rgb(30, 50, 30)
+        Note over BE,CN: Atomic Transaction
+        BE->>CN: 1. AcceptDeposit
+        BE->>CN: 2. BurnMintFactory Mint(shares)
+        BE->>CN: 3. RecordMint on VaultState
+    end
+
+    CN-->>BE: Holding(dvUSDC) created
+    BE-->>FE: tx result
+    FE-->>User: confirmation
 ```
 
 All three operations (accept deposit, mint dvUSDC, record mint) execute in a **single atomic Canton transaction**, guaranteeing consistent state.
 
 ### 5.2 Withdrawal Flow
 
-```
-User                    Frontend              Backend (Operator)           Canton
- │                         │                         │                       │
- │── withdraw(shares) ────►│                         │                       │
- │                         │── create WithdrawReq ──►│                       │
- │                         │                         │── create WithdrawReq ►│
- │                         │                         │                       │
- │                         │                         │── read VaultState ────►│
- │                         │                         │◄── sharePrice ────────│
- │                         │                         │                       │
- │                         │                         │   redemption = shares  │
- │                         │                         │              × price   │
- │                         │                         │                       │
- │                         │                         │── ATOMIC TRANSACTION: │
- │                         │                         │   1. AcceptWithdraw   │
- │                         │                         │   2. BurnMintFactory  │
- │                         │                         │      Burn(shares)     │
- │                         │                         │   3. RecordBurn       │
- │                         │                         │──────────────────────►│
- │                         │                         │                       │
- │◄── USDCx returned ─────│◄── tx result ──────────│                       │
+```mermaid
+sequenceDiagram
+    actor User
+    participant FE as Frontend
+    participant BE as Backend (Operator)
+    participant CN as Canton Ledger
+
+    User->>FE: withdraw(shares)
+    FE->>CN: create WithdrawRequest
+    CN-->>BE: WithdrawRequest contract active
+
+    BE->>CN: read VaultState
+    CN-->>BE: sharePrice
+
+    Note over BE: redemption = shares × sharePrice
+
+    rect rgb(30, 50, 30)
+        Note over BE,CN: Atomic Transaction
+        BE->>CN: 1. AcceptWithdraw
+        BE->>CN: 2. BurnMintFactory Burn(shares)
+        BE->>CN: 3. RecordBurn on VaultState
+    end
+
+    CN-->>BE: dvUSDC Holdings consumed
+    BE-->>FE: tx result + USDCx transfer
+    FE-->>User: USDCx returned
 ```
 
 ### 5.3 Yield Claim Flow
 
-```
-User                    Backend (Operator)           Canton
- │                         │                           │
- │── claimYield() ────────►│                           │
- │                         │── read user Holdings ────►│
- │                         │── read VaultState ───────►│
- │                         │                           │
- │                         │   yieldShares = shares ×  │
- │                         │     (1 - entryPrice /     │
- │                         │          currentPrice)    │
- │                         │                           │
- │                         │── ATOMIC TRANSACTION:     │
- │                         │   1. AcceptClaim          │
- │                         │   2. Burn(yieldShares)    │
- │                         │   3. RecordBurn           │
- │                         │   4. Transfer USDCx       │
- │                         │      (or re-mint if       │
- │                         │       autoCompound)       │
- │                         │──────────────────────────►│
- │                         │                           │
- │◄── yield distributed ──│                           │
+```mermaid
+sequenceDiagram
+    actor User
+    participant BE as Backend (Operator)
+    participant CN as Canton Ledger
+
+    User->>BE: claimYield()
+    BE->>CN: read user dvUSDC Holdings
+    BE->>CN: read VaultState
+    CN-->>BE: holdings + sharePrice
+
+    Note over BE: yieldShares = shares ×<br/>(1 - entryPrice / currentPrice)
+
+    rect rgb(30, 50, 30)
+        Note over BE,CN: Atomic Transaction
+        BE->>CN: 1. AcceptClaim
+        BE->>CN: 2. Burn(yieldShares)
+        BE->>CN: 3. RecordBurn
+        alt autoCompound = true
+            BE->>CN: 4. Re-mint at current price
+        else autoCompound = false
+            BE->>CN: 4. Transfer USDCx to holder
+        end
+    end
+
+    BE-->>User: yield distributed
 ```
 
 ---
@@ -489,22 +496,21 @@ template LiquidityPool
 
 ### 6.2 Arbitrage Mechanism
 
-When dvUSDC trades below NAV on the LP:
+```mermaid
+flowchart LR
+    subgraph BelowNAV["dvUSDC below NAV (discount)"]
+        direction TB
+        B1["Bot buys discounted dvUSDC\nfrom LP"] --> B2["Bot submits WithdrawRequest\nat full NAV price"]
+        B2 --> B3["Bot earns spread:\nNAV - LP price - fees"]
+        B3 --> B4["LP price converges\nback to NAV"]
+    end
 
-```
-1. Arbitrage bot buys discounted dvUSDC from LP
-2. Bot submits WithdrawRequest at full NAV price
-3. Bot earns spread: NAV price - LP price - fees
-4. LP price converges back to NAV
-```
-
-When dvUSDC trades above NAV (high demand):
-
-```
-1. Bot deposits USDCx via DepositOffer at NAV price
-2. Bot sells freshly minted dvUSDC on LP at premium
-3. Bot earns spread: LP price - NAV price - fees
-4. LP price converges back to NAV
+    subgraph AboveNAV["dvUSDC above NAV (premium)"]
+        direction TB
+        A1["Bot deposits USDCx via\nDepositOffer at NAV"] --> A2["Bot sells minted dvUSDC\non LP at premium"]
+        A2 --> A3["Bot earns spread:\nLP price - NAV - fees"]
+        A3 --> A4["LP price converges\nback to NAV"]
+    end
 ```
 
 Each arbitrage cycle generates multiple CIP-56 transactions (mint, burn, transfer, swap) — all economically motivated.
@@ -530,43 +536,57 @@ No actual fund movement. The NAV Oracle reads EVM vault TVL and posts it to Cant
 
 Integration with **Circle xReserve** for actual USDCx ↔ USDC bridging:
 
-```
-Deposit:
-  User deposits USDCx on Canton
-    → Backend initiates xReserve withdrawal (Canton → EVM)
-    → USDC received on EVM
-    → Backend deposits USDC into yield strategies
-    → NAV updates on Canton reflect new TVL
+```mermaid
+sequenceDiagram
+    participant User
+    participant CN as Canton (USDCx)
+    participant BE as Backend
+    participant BR as Circle xReserve
+    participant EVM as EVM Vault
 
-Withdrawal:
-  User creates WithdrawRequest on Canton
-    → Backend withdraws USDC from yield strategies
-    → Backend initiates xReserve deposit (EVM → Canton)
-    → USDCx received on Canton
-    → Backend transfers USDCx to user
-    → dvUSDC burned, VaultState updated
+    Note over User,EVM: Deposit Flow
+    User->>CN: deposit USDCx
+    BE->>BR: initiate xReserve withdrawal (Canton → EVM)
+    BR->>EVM: USDC received
+    BE->>EVM: deposit USDC into yield strategies
+    BE->>CN: UpdateNAV reflects new TVL
+
+    Note over User,EVM: Withdrawal Flow
+    User->>CN: create WithdrawRequest
+    BE->>EVM: withdraw USDC from strategies
+    BE->>BR: initiate xReserve deposit (EVM → Canton)
+    BR->>CN: USDCx received
+    BE->>CN: transfer USDCx to user, burn dvUSDC, update VaultState
 ```
 
 ### 7.3 Bridge Architecture
 
-```
-Canton Network                    Circle xReserve                 EVM
-┌──────────────┐                 ┌──────────────┐          ┌──────────────┐
-│  USDCx       │ ◄──────────── │  Bridge       │ ◄──────  │  USDC        │
-│  (Canton)    │  deposit       │  Contract     │  lock    │  (Ethereum)  │
-│              │ ──────────── ►│              │ ──────► │              │
-│              │  withdraw      │              │  release │              │
-└──────────────┘                 └──────────────┘          └──────┬───────┘
-                                                                  │
-                                                           ┌──────┴───────┐
-                                                           │  Ditto Vault │
-                                                           │  Allocator   │
-                                                           │              │
-                                                           │  Aave        │
-                                                           │  Morpho      │
-                                                           │  Fluid       │
-                                                           │  Spark       │
-                                                           └──────────────┘
+```mermaid
+flowchart LR
+    subgraph Canton["Canton Network"]
+        USDCx["USDCx"]
+    end
+
+    subgraph Bridge["Circle xReserve"]
+        BC["Bridge Contract"]
+    end
+
+    subgraph EVM["EVM"]
+        USDC["USDC (Ethereum)"]
+        VA["Ditto Vault Allocator"]
+        Aave
+        Morpho
+        Fluid
+        Spark
+    end
+
+    USDCx <-->|"deposit / withdraw"| BC
+    BC <-->|"lock / release"| USDC
+    USDC --- VA
+    VA --> Aave
+    VA --> Morpho
+    VA --> Fluid
+    VA --> Spark
 ```
 
 ---
@@ -579,18 +599,17 @@ The backend runs as a set of services that interact with both Canton (via JSON L
 
 Polls for pending workflow contracts and processes them atomically.
 
-```
-Poll interval: 1-5 seconds
-
-Loop:
-  1. Query active DepositOffer contracts
-     → For each: calculate shares, execute atomic mint transaction
-  2. Query active WithdrawRequest contracts
-     → For each: calculate redemption, execute atomic burn transaction
-  3. Query active YieldClaim contracts
-     → For each: calculate yield, execute claim transaction
-  4. Query active LP SwapRequest contracts
-     → For each: validate liquidity, execute swap
+```mermaid
+flowchart TD
+    Start["Poll (every 1-5s)"] --> D["Query active\nDepositOffer contracts"]
+    D --> D1["Calculate shares\nExecute atomic mint tx"]
+    D1 --> W["Query active\nWithdrawRequest contracts"]
+    W --> W1["Calculate redemption\nExecute atomic burn tx"]
+    W1 --> Y["Query active\nYieldClaim contracts"]
+    Y --> Y1["Calculate yield\nExecute claim tx"]
+    Y1 --> S["Query active\nLP SwapRequest contracts"]
+    S --> S1["Validate liquidity\nExecute swap"]
+    S1 --> Start
 ```
 
 **Atomic transaction composition** (single Ledger API command):
@@ -608,43 +627,40 @@ All three commands execute atomically — if any fails, the entire transaction r
 
 ### 8.2 NAV Oracle
 
-```
-Schedule: every 15 minutes (MVP) → every block (production)
-
-1. Read EVM vault contract: totalAssets()
-2. Read EVM vault contract: totalSupply() (for internal consistency check)
-3. Calculate management fee accrual
-4. Post UpdateNAV to VaultState on Canton
-5. Log NAV history for APY calculation
+```mermaid
+flowchart LR
+    T["Schedule:\nevery 15min (MVP)\nevery block (prod)"] --> A["Read EVM vault\ntotalAssets()"]
+    A --> B["Read EVM vault\ntotalSupply()"]
+    B --> C["Calculate mgmt\nfee accrual"]
+    C --> D["Post UpdateNAV\nto VaultState"]
+    D --> E["Log NAV history\nfor APY calc"]
 ```
 
 ### 8.3 UTXO Manager
 
 CIP-56 holdings follow a UTXO model. Frequent deposits create holding fragmentation.
 
-```
-Schedule: every 1 hour
-
-1. Query all dvUSDC Holdings grouped by owner
-2. For owners with > 5 Holdings:
-   → Exercise MergeDelegation to consolidate into single Holding
-3. Each merge generates an activity marker
+```mermaid
+flowchart LR
+    T["Schedule:\nevery 1 hour"] --> Q["Query all dvUSDC\nHoldings by owner"]
+    Q --> F{"Owner has\n> 5 Holdings?"}
+    F -->|Yes| M["Exercise MergeDelegation\nConsolidate into 1 Holding"]
+    M --> AM["Activity marker\ngenerated"]
+    F -->|No| S["Skip"]
 ```
 
 ### 8.4 LP Market Maker
 
-```
-Schedule: continuous (event-driven)
-
-1. Monitor LP pool price vs NAV oracle price
-2. If LP price < NAV - threshold:
-   → Buy dvUSDC from LP (cheap)
-   → Submit WithdrawRequest at NAV (full value)
-   → Pocket spread
-3. If LP price > NAV + threshold:
-   → Submit DepositOffer at NAV
-   → Sell dvUSDC on LP (premium)
-   → Pocket spread
+```mermaid
+flowchart TD
+    M["Monitor LP price\nvs NAV oracle"] --> C{"LP price vs NAV"}
+    C -->|"LP < NAV - threshold"| Buy["Buy dvUSDC from LP\n(discounted)"]
+    Buy --> WR["Submit WithdrawRequest\nat NAV (full value)"]
+    WR --> P1["Pocket spread"]
+    C -->|"LP > NAV + threshold"| Dep["Submit DepositOffer\nat NAV"]
+    Dep --> Sell["Sell dvUSDC on LP\n(premium)"]
+    Sell --> P2["Pocket spread"]
+    C -->|"Within threshold"| Hold["No action"]
 ```
 
 ---
@@ -696,61 +712,54 @@ Per Canton Featured App requirements:
 
 ### 10.1 Infrastructure
 
-```
-┌─────────────────────────────────────────────────┐
-│  Canton Participant Node                         │
-│  (Ditto-operated validator on DevNet/MainNet)    │
-│                                                   │
-│  ┌─────────────┐  ┌──────────────────────────┐  │
-│  │  Daml Engine │  │  JSON Ledger API (gRPC)  │  │
-│  │  .dar files  │  │  Port 5001               │  │
-│  └─────────────┘  └──────────┬───────────────┘  │
-└──────────────────────────────┼───────────────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    │  Backend Services    │
-                    │  (Kubernetes / VM)   │
-                    │                      │
-                    │  ┌────────────────┐  │
-                    │  │ Lifecycle Bot  │  │
-                    │  │ NAV Oracle     │  │
-                    │  │ UTXO Manager   │  │
-                    │  │ LP Market Maker│  │
-                    │  └────────────────┘  │
-                    │                      │
-                    │  ┌────────────────┐  │
-                    │  │ API Gateway    │  │
-                    │  │ (REST → gRPC)  │  │
-                    │  └────────┬───────┘  │
-                    └───────────┼──────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    │  Frontend (React)    │
-                    │  Hosted on Vercel    │
-                    │                      │
-                    │  OAuth2 auth via     │
-                    │  Canton identity     │
-                    └─────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Participant["Canton Participant Node"]
+        DE["Daml Engine\n.dar files"]
+        LA["JSON Ledger API\n(gRPC, Port 5001)"]
+        DE --- LA
+    end
+
+    subgraph Backend["Backend Services (Kubernetes / VM)"]
+        subgraph Bots["Service Layer"]
+            LB["Lifecycle Bot"]
+            NO["NAV Oracle"]
+            UM["UTXO Manager"]
+            MM["LP Market Maker"]
+        end
+        AG["API Gateway\n(REST → gRPC)"]
+    end
+
+    subgraph Frontend["Frontend (React, Vercel)"]
+        UI["Web App\nOAuth2 via Canton Identity"]
+    end
+
+    LA <--> Bots
+    LA <--> AG
+    AG <--> UI
 ```
 
 ### 10.2 Deployment Sequence
 
-```
-Phase 1 (DevNet):
-  1. daml build → compile .dar packages
-  2. Upload .dar to DevNet participant node
-  3. Register dvUSDC in Registry Utility (AllocationFactory + TransferRule)
-  4. Deploy backend services pointing to DevNet JSON Ledger API
-  5. Deploy frontend to Vercel
-  6. Initialize VaultState contract with NAV = 0, totalShares = 0
+```mermaid
+flowchart TD
+    subgraph DevNet["Phase 1 — DevNet"]
+        D1["daml build\ncompile .dar"] --> D2["Upload .dar to\nDevNet participant"]
+        D2 --> D3["Register dvUSDC\nAllocationFactory + TransferRule"]
+        D3 --> D4["Deploy backend\n→ DevNet Ledger API"]
+        D4 --> D5["Deploy frontend\nto Vercel"]
+        D5 --> D6["Initialize VaultState\nNAV=0, totalShares=0"]
+    end
 
-Phase 3 (MainNet):
-  1. Security audit of Daml contracts
-  2. Upload audited .dar to MainNet participant node
-  3. Re-register dvUSDC in MainNet Registry Utility
-  4. Migrate backend to production infrastructure
-  5. Apply for FeaturedAppRight from Tokenomics Committee
-  6. Configure AppRewardConfiguration for activity marker rewards
+    subgraph MainNet["Phase 3 — MainNet"]
+        M1["Security audit\nof Daml contracts"] --> M2["Upload audited .dar\nto MainNet participant"]
+        M2 --> M3["Re-register dvUSDC\nin MainNet Registry"]
+        M3 --> M4["Migrate backend to\nproduction infra"]
+        M4 --> M5["Apply for FeaturedAppRight\nfrom Tokenomics Committee"]
+        M5 --> M6["Configure AppRewardConfiguration\nfor activity markers"]
+    end
+
+    DevNet --> MainNet
 ```
 
 ### 10.3 Contract Packages
