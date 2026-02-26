@@ -8,7 +8,7 @@
 
 ## Overview
 
-Ditto Vault bridges risk-adjusted yield from EVM DeFi to Canton Network through a CIP-56-compliant vault token (**dvUSDC**). Users deposit USDCx on Canton and receive dvUSDC — a yield-bearing token backed by professionally managed allocations across leading DeFi money markets. Yield generation is fully autonomous and secured by Ditto Network's decentralized operator set of 16 operators across Eigenlayer and Symbiotic, securing over $200M in TVL.
+Ditto Vault bridges risk-adjusted yield from EVM DeFi to Canton Network through a CIP-56-compliant vault token (**dvUSDC**). Users deposit USDCx on Canton and receive dvUSDC — a yield-bearing token backed by yield coming from leading DeFi money markets. Yield generation is fully autonomous and secured by Ditto Network's decentralized operator set of 16 operators across Eigenlayer and Symbiotic, securing over $200M in TVL.
 
 ---
 
@@ -18,9 +18,9 @@ Canton Network enables institutional-grade tokenization, but stablecoins like US
 
 ## Proposed Solution
 
-**Ditto Vault** is an asynchronous curator vault that issues **dvUSDC** — a yield-bearing CIP-56 token backed by professionally managed EVM strategies across Aave, Morpho, Fluid, and Spark.
+**Ditto Vault** is an asynchronous curator vault that issues **dvUSDC** — a yield-bearing CIP-56 token backed by yield coming from EVM strategies across Aave, Morpho, Fluid, and Spark.
 
-A curator (vault operator) manages allocations while Canton handles tokenization, accounting, and settlement. An asynchronous request-accept model ensures institutional controls, accurate NAV pricing, and full on-chain auditability.
+Vault manages allocations while Canton handles tokenization, accounting, and settlement. An asynchronous request-accept model ensures institutional controls, accurate NAV pricing, and full on-chain auditability.
 
 ---
 
