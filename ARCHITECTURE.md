@@ -17,6 +17,8 @@
 - [9. Backend services](#9-backend-services)
 - [10. Security model](#10-security-model)
 - [11. Deployment architecture](#11-deployment-architecture)
+- [12. Ethereum→Canton inbound onramp](#12-ethereumcanton-inbound-onramp)
+- [13. KYC-gated tokenized fund marketplace](#13-kyc-gated-tokenized-fund-marketplace)
 
 ---
 
@@ -477,12 +479,160 @@ The operator party's actAs/readAs credentials are stored as environment variable
 | `NavAnchor` per dvToken instrument | Canton synchronizer | Daml templates from `ditto-vault-contracts`, signed by `ditto-vault-1` |
 | Alpend / Cantex positions | Canton synchronizer | Daml templates from respective protocols |
 | DVN attestations | Canton synchronizer | Daml templates from `ditto-oracle` (dedicated party) |
+| Solver inventory Holdings (Phase 6) | Canton synchronizer | USDCx held by `ditto-solver-inventory` party for fast-path fronting |
+| SPV-wrapper Holdings (Phase 8) | Canton synchronizer | One `ditto-spv-<fundId>` party per marketplace fund, holding the underlying tokenized instrument |
 | Express.js API + indexer + strategy router + marker submission service | Application server | Docker container, Express.js process |
+| Solver quote / settlement service (Phase 6) | Off-Canton + Ethereum integration | Express.js process alongside the existing backend, plus Ethereum RPC client and confirmation watcher |
+| KYC eligibility service (Phase 8) | Application server | Persona webhook receiver; writes `marketplace_eligible` flag into PostgreSQL on user clearance |
 | PostgreSQL | Application server (managed) | Managed PG instance |
 | User app (React) | Application server | Static bundle served by Express |
 | Admin dashboard | Application server | Static bundle served by Express, gated by domain |
 
 The application server reaches Canton via the JSON Ledger API v2. On DevNet this is via an SSH tunnel to the validator node. On MainNet the application server connects to the validator's public ingress over TLS.
+
+---
+
+## 12. Ethereum→Canton inbound onramp
+
+Phase 6. Channels USDC on Ethereum (and EVM L2s post-launch) directly into Canton vault deposits in a single user transaction. **Inbound only by contract construction** — no admin endpoint, Daml choice, or operator workflow can move Canton balances off Canton for yield.
+
+### Why "inbound-only by construction" is load-bearing
+
+The April 2026 Tokenomics Committee decision restricted bridging Canton stablecoins to EVM **for yield**. The onramp is the opposite direction (capital arriving on Canton) and a different purpose (onboarding, not yield routing). To make the direction-asymmetry verifiable rather than policy-promised, the architecture enforces it at the contract layer:
+
+- The `BurnMintFactory` for USDCx has no off-Canton sink choice. Burns produce no off-chain side-effect.
+- The strategy router adapter framework only contains adapters for Canton-native protocols (Alpend, Cantex, future Canton protocols). There is no Adapter type with an Ethereum endpoint.
+- The solver inventory party (`ditto-solver-inventory`) holds USDCx for fronting deposits; it has no choice or workflow that exports USDCx off Canton.
+
+These are properties of the deployed code, not policy commitments. An auditor or committee member can verify the asymmetry by inspecting the contract surface.
+
+### Solver architecture
+
+Built on **Ditto's existing solver network** — the same operator set securing $200M+ TVL across Eigenlayer/Symbiotic — extended with EVM→Canton routes.
+
+```
+ETH side                                                       Canton side
+──────────────────────────────────────────────────────────────────────────
+USDC on Ethereum (user)                                  USDCx on Canton
+       │                                                        ▲
+       │ user signs one transaction                             │ minted to user party
+       ▼                                                        │
+Ditto solver — quote / route engine                            │
+       │                                                        │
+       ├──── fast path ────► solver inventory front  ──────────┤
+       │     (DVN-attested ETH confirmation)                   │
+       │                                                        │
+       └──── slow path ────► CCTP / partner mint  ─────────────┘
+                              (canonical settlement)
+```
+
+### Components
+
+| Component | Party / Service | Role |
+|---|---|---|
+| **Solver quote engine** | Off-Canton service | Computes a USDC→USDCx→vault-deposit quote for a given input amount, target vault, and source chain. Returns quote with expiry. |
+| **Solver inventory party** | `ditto-solver-inventory` (Canton) | Holds USDCx that the solver fronts to users on fast-path deposits. Replenished from canonical CCTP-class mints. |
+| **Source-chain confirmation watcher** | Off-Canton + Ethereum RPC | Watches Ethereum (and post-launch L2s) for the user's USDC deposit reaching sufficient confirmations. Publishes a DVN cross-chain finality attestation to Canton. |
+| **Onramp deposit indexer** | Existing indexer service, additional memo key | Detects solver-fronted USDCx Holdings at the operator party, routes them into the user's chosen vault with a single auto-deposit pass. |
+| **Frontend onramp module** | React app | Wallet connect on Ethereum, quote display, signature, status polling. Single-transaction UX. |
+| **KYT / AML stack** | Partner-onramp at launch (Circle CCTP); Ditto-side stack later | Compliance for inbound USDC under originating-chain expectations. |
+
+### Solver inventory math
+
+Solver inventory has an opportunity cost — capital that could be earning vault yield instead. Inventory is sized against measured demand, not aspirational:
+
+- **Inventory floor** — fast path disables below floor; canonical CCTP-class mint becomes the user-visible path.
+- **Fast-path budget** — daily inventory replenishment cap, beyond which the solver routes through canonical settlement only.
+- **Float yield** — solver inventory itself earns the lowest-risk Canton-native APY (Alpend USDCx passive supply) when not being used; opportunity-cost recovered.
+
+### Risk surface
+
+| Risk | Mitigation |
+|---|---|
+| Solver inventory blowup under withdrawal stress | Inventory floor + canonical fallback path |
+| Ethereum reorg risk on solver fast path | Source-chain confirmation thresholds tuned per chain; solver absorbs reorg risk, not user |
+| KYT/AML wiring on partner onramps | Partner-onramp compliance stack at launch (Circle CCTP); Ditto-side KYT added if volume justifies |
+| Optics — committee re-reading inbound onramp as outbound bridge | Direction-asymmetry enforced at contract layer (this section), made explicit in every committee communication |
+
+---
+
+## 13. KYC-gated tokenized fund marketplace
+
+Phase 8. Permissioned-access vault product line wrapping tokenized fund instruments already issued on Canton (FT FOBXX, Broadridge DLR, HQLAX, HSBC TDS, private-credit-fund SPVs). Same `ditto-vault-1` issuer, same `NavAnchor` infrastructure, KYC at the user on-ramp.
+
+### Party structure
+
+Per-fund SPV isolation keeps each marketplace product's legal blast radius bounded.
+
+| Party | Function | Why isolated |
+|---|---|---|
+| **`ditto-vault-1`** | Issues `dv<fund>` CIP-56 tokens for every marketplace product | Same issuer role as Core tier; CIP-47 Rule 10 isolation preserved |
+| **`ditto-vault-operator`** | Routes pooled marketplace USDCx into the per-fund SPV | Same operator role as Core tier |
+| **`ditto-spv-<fundId>`** *(one per marketplace product)* | Bankruptcy-remote LLC/SP entity, KYC'd as LP of record for the underlying fund. Holds the tokenized fund instrument. Issues the obligation backing `dv<fundId>`. | Legal isolation per fund; one fund's troubles cannot reach into another |
+| **`ditto-oracle`** | DVN attests fund-admin NAV reports | Same Phase 5+ party; serves marketplace as a primary consumer |
+
+A new marketplace product requires:
+1. SPV legal entity formed for the target fund.
+2. `ditto-spv-<fundId>` party created on Canton; KYC'd at the issuer level for the underlying tokenized fund.
+3. New `dv<fundId>` CIP-56 instrument issued under `ditto-vault-1` with its own BurnMintFactory and NavAnchor.
+4. DVN fund-admin attestation pipeline configured for the new fund.
+5. KYC eligibility check extended to gate this product's UI surface.
+6. Per-jurisdiction accreditation requirements wired into Persona workflow.
+
+### KYC eligibility
+
+KYC is performed once at user signup for the marketplace tier — not at every deposit:
+
+```
+User signs up
+   │
+   ├── Persona KYC flow (one-time, per-jurisdiction config)
+   │     ├── Identity verification
+   │     ├── Accreditation status (Reg D 506(c) / MiFID-II professional / etc.)
+   │     └── Sanctions / PEP screening
+   │
+   ├── On clearance → PostgreSQL `users.marketplace_eligible = true`
+   │                                 `users.accreditation_status = <jurisdiction>`
+   │                                 `users.kyc_expires_at = signup + 1y`
+   │
+   └── Frontend surfaces marketplace dvTokens; backend allows minting only to eligible users
+```
+
+Approved users gain access to the full marketplace shelf. Users without KYC see only Core and Locked retail tiers — no UI leakage, no accidental allocation.
+
+KYC is refreshed annually; re-attestation required at material changes (e.g., loss of accredited status).
+
+### NAV attestation pipeline (DVN integration)
+
+Marketplace dvToken share price is computed from off-chain fund-admin NAV reports made tamper-evident via DVN attestation:
+
+```
+Fund admin (off-chain)
+   │
+   ▼
+Submits NAV report ──► DVN operator quorum signs ──► Daml `RwaNavAttestation`
+                                                       (on Canton, ditto-oracle party)
+                                                              │
+                                                              ▼
+                                       Marketplace dvToken's NavAnchor recomputed
+                                              ├── NAV = SPV.tokenized_fund_balance × DVN-attested-price
+                                              └── share_price = NAV / total_shares
+```
+
+If a DVN attestation goes stale (>24h):
+- Last-attested NAV used as fallback with explicit disclosure to users.
+- New marketplace deposits paused until attestation refreshes.
+- Existing redemptions continue at last-attested NAV.
+
+### Risk surface
+
+| Risk | Mitigation |
+|---|---|
+| Per-fund SPV legal lead-time (weeks–months) | Start BD + legal in Q3 2026; sequence partners so one ship per quarter is realistic |
+| Accreditation regime drift across jurisdictions | Persona workflow configured per jurisdiction; eligibility gated at signup |
+| NAV attestation staleness | Last-attested-NAV fallback; pause new mints if >24h |
+| Fund issuer reluctance to be wrapped by a third party | Partnership-driven; pitch DVN attestation + retail discovery as upside |
+| Liquidity mismatch (private credit) | Marketplace fund-grade products use quarterly redemption windows; users wanting daily liquidity stay on Core / Locked retail |
 
 ---
 

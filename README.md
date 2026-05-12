@@ -6,9 +6,13 @@
 
 ## Overview
 
-Ditto Vault is a Canton-native asset management platform — a system for issuing and operating multi-strategy yield vaults on the Canton Network. The first product is `dvUSDCx`, a daily-liquid USDCx vault whose share token tracks an actively-managed allocation across Canton-native lending and DEX protocols. Additional vaults will follow the same architecture: different base assets (CC, CBTC), different lock terms (90-day, 1-year), and different strategy mixes.
+Ditto Vault is a Canton-native asset management platform — a system for issuing and operating multi-strategy yield vaults on the Canton Network. The first product is `dvUSDCx-CORE`, a daily-liquid USDCx vault whose share token tracks an actively-managed allocation across Canton-native lending and DEX protocols. The architecture extends along three axes:
 
-There is no cross-chain bridging and no off-Canton custody: every dollar of vault NAV is held in a Canton-native protocol position or in idle reserves. All user-facing interactions are non-custodial CIP-56 transfers.
+- **Permissionless retail variants** — `dvUSDCx-LOCK90`, `dvUSDCx-LOCK1Y`, `dvCC`, `dvCBTC` — different base assets, lock terms, and strategy mixes, all Canton-native.
+- **KYC-gated tokenized fund marketplace** — `dvFOBXX`, `dvDLR`, `dvHQLAX`, `dvTDS`, plus private-credit-fund SPVs — accredited / institutional access to tokenized fund instruments already issued on Canton, wrapped under per-fund SPV structures.
+- **Ethereum→Canton inbound onramp** — a Ditto-operated solver layered on CCTP-class partner rails, channeling USDC on Ethereum directly into Canton vault deposits in a single transaction.
+
+All yield is generated **inside Canton**; no Canton balances are routed off-Canton for yield. Cross-chain capital flow is **inbound only** — external capital arrives on Canton via the solver and partner onramps, and from that point forward every dollar of vault NAV is held in a Canton-native protocol position or in idle reserves. All user-facing interactions on Canton are non-custodial CIP-56 transfers.
 
 The platform is governed by Ditto Network — operator of 16 nodes across Eigenlayer and Symbiotic restaking infrastructure with $200M+ in cryptoeconomically-secured TVL — and is the reference application for the **Ditto Verification Network (DVN)**, an operator-attested price and state feed for the broader Canton DeFi ecosystem.
 
@@ -94,20 +98,80 @@ The strategy router's rebalance logic is rule-based — utilization spikes, rate
 
 ---
 
+## Ethereum→Canton Capital Onboarding
+
+The largest stablecoin liquidity pool today sits on Ethereum (and EVM L2s). To bring that capital into Canton-native yield without compromising the *yield generated inside Canton* principle, the platform ships an **inbound-only onramp** built on **Ditto's existing solver network** — the same operator set that secures $200M+ TVL across Eigenlayer and Symbiotic, extended to support EVM→Canton routes.
+
+| Direction | Behavior |
+|---|---|
+| **Ethereum → Canton** | Supported. User signs one transaction on Ethereum with USDC; Ditto's solver network fronts USDCx on Canton from inventory and auto-deposits into the chosen vault. User receives dvTokens. |
+| **Canton → Ethereum** | **Not supported.** No admin endpoint, no Daml choice, and no operator workflow can move Canton assets off Canton for yield. The contract surface is one-way by construction. |
+
+### Architecture
+
+The solver wraps a canonical CCTP-class rail (Circle CCTP or equivalent) for the settlement layer and adds:
+
+- **Inventory-based fast settlement** — solver fronts USDCx on Canton against inventory; canonical mint replenishes in the background.
+- **Single-transaction UX** — bridge + vault deposit collapsed into one user action.
+- **Cross-chain attestation** — DVN attests that the user's Ethereum-side payment is final before Canton-side credit completes.
+- **KYT/AML wiring** — partner-onramp compliance stack (Circle CCTP at launch); Ditto-side KYT pipeline added if volume justifies.
+
+From the user's perspective: *deposit USDC on Ethereum, receive dvTokens on Canton, earn Canton-native yield.* No bridge transaction to track, no second signature, no Canton-side wallet setup required for the deposit itself (Canton receipt is held to user's named party).
+
+This onramp is the platform's primary mechanism for growing on-Canton TVL: it channels existing stablecoin capital into Canton-native vault products and the KYC-gated marketplace tier, increasing on-Canton activity and TVL without any Canton-side balance ever leaving Canton.
+
+---
+
+## Tokenized Fund Marketplace (KYC-Gated)
+
+Canton today hosts >$6T of tokenized RWA, dominated by institutional-grade fund instruments (Franklin Templeton FOBXX, Broadridge DLR, HQLAX, HSBC TDS, DTCC ComposerX, and a growing private-credit-fund SPV pipeline). Every one of these is issued under issuer-level KYC and is not directly investable from a permissionless retail vault.
+
+The marketplace tier opens these instruments to accredited and institutional users via a **KYC-gated vault product line** sharing the same issuer (`ditto-vault-1`), the same `NavAnchor` infrastructure, and the same composability surface as the permissionless Core tier — but with:
+
+- **One-time KYC at signup** unlocking the entire marketplace shelf (not per-deposit).
+- **Per-fund SPV legal wrappers** routing capital from the marketplace dvToken to the underlying tokenized fund instrument.
+- **DVN-attested NAV** from fund-admin reports — without DVN attestation the marketplace tier is uninvestable, because off-chain NAV would otherwise be unverifiable on-chain.
+
+### Product structure
+
+| Product audience | dvToken examples | Wraps |
+|---|---|---|
+| **Permissionless retail** | `dvUSDCx-CORE`, `dvUSDCx-LOCK90`, `dvUSDCx-LOCK1Y`, `dvCC`, `dvCBTC` | Canton-native lending + LP strategies |
+| **KYC'd marketplace — money market** | `dvFOBXX`, `dvDLR` | Tokenized money-market shares |
+| **KYC'd marketplace — collateral / HQLA** | `dvHQLAX`, `dvTDS` | Tokenized repo, HQLA, time deposits |
+| **KYC'd marketplace — private credit** | `dvCredit-A`, `dvCredit-B`, … | SPV-wrapped LP interests in actively-managed credit funds, targeting 12%+ yield |
+
+### SPV / legal wrapper structure
+
+| Layer | Purpose |
+|---|---|
+| Marketplace user (KYC'd) | Holds `dvFundX` CIP-56 token in their wallet |
+| `dvFundX` issuer | `ditto-vault-1` (same party as Core; Rule 10 isolation preserved because the issuer-only role applies to all dvTokens uniformly) |
+| Vault operator | `ditto-vault-operator` (allocates pooled marketplace USDCx into the SPV) |
+| **SPV (per fund)** | Bankruptcy-remote LLC / SP entity, KYC'd as the LP of record for the underlying fund. Holds the tokenized fund instrument. Issues the obligation backing `dvFundX`. |
+| Tokenized fund issuer | FT / Broadridge / HQLAX / HSBC / private-credit-fund manager |
+
+Coupon / interest flows: fund → SPV → operator → NAV update → `dvFundX` share-price tick. DVN attests the fund-admin's NAV reports on a regular cadence, making off-chain accounting tamper-evident on-chain.
+
+The marketplace tier is the platform's path to fund-grade yield products at scale and the most direct way to engage Canton's institutional RWA base. It is partnership-led, multi-quarter, and ships per-product (not as a single launch). See [Roadmap](#roadmap) for sequencing.
+
+---
+
 ## Ditto Verification Network (DVN)
 
 Canton DeFi today has no native price oracle equivalent of Chainlink or Pyth. Lending and DEX protocols on Canton currently rely on undisclosed or self-reported price sources — a load-bearing systemic risk as TVL grows.
 
-Ditto Network already operates a 16-node operator set across Eigenlayer and Symbiotic, securing $200M+ in restaking TVL. **DVN** repurposes that operator set as a quorum-attested price and state feed for the Canton ecosystem:
+Ditto Network already operates a 16-node operator set across Eigenlayer and Symbiotic, securing $200M+ in restaking TVL. **DVN** repurposes that operator set as a quorum-attested price, state, and NAV attestation layer for the Canton ecosystem:
 
-| Feed | Content | Cadence |
-|---|---|---|
-| **Spot prices** | USDCx/CC, CC/USD, CBTC/USD, plus any CIP-56 token pair on demand | Per-block |
-| **Protocol state** | Alpend market utilization, available liquidity, health factors; Cantex pool depth and fee accrual | Per-block |
-| **RWA NAV** | Off-chain fund admin reports for tokenized credit-fund tranches *(future)* | Monthly / event-driven |
-| **Cross-protocol health** | Aggregated risk attestations the strategy router uses for allocation decisions | Continuous |
+| Feed | Content | Cadence | Consumers |
+|---|---|---|---|
+| **Spot prices** | USDCx/CC, CC/USD, CBTC/USD, plus any CIP-56 token pair on demand | Per-block | Strategy router, lending markets, DEX oracles |
+| **Protocol state** | Alpend market utilization, available liquidity, health factors; Cantex pool depth and fee accrual | Per-block | Strategy router, risk monitors |
+| **RWA NAV attestation** | Off-chain fund-admin reports for tokenized money-market, collateral, and credit-fund instruments | Monthly / event-driven | Marketplace-tier vaults (`dvFOBXX`, `dvDLR`, `dvHQLAX`, `dvTDS`, private credit) |
+| **Cross-chain finality** | Proof on Canton that an Ethereum-side onramp payment is final | Per ETH-side confirmation | Solver fast-path, onramp deposit indexer |
+| **Cross-protocol health** | Aggregated risk attestations the strategy router uses for allocation decisions | Continuous | Strategy router |
 
-The vault is the first internal consumer — every rebalance, hedge, and liquidation guard relies on these feeds — which makes the oracle dogfooded before externalization. Once proven internally, the same feeds become a separate ecosystem product available to any Canton DeFi protocol under a basis-point licensing model.
+The vault is the first internal consumer — every rebalance, hedge, and liquidation guard relies on DVN feeds — which makes DVN dogfooded before externalization. The marketplace tier and the onramp both depend on DVN: marketplace dvTokens compute share price from DVN-attested fund-admin NAV reports, and the solver fast path uses DVN cross-chain finality proofs to credit Canton deposits before canonical CCTP-class settlement completes. Once proven internally across these three consumers (vault, marketplace, onramp), the same feeds become a separate ecosystem product available to any Canton DeFi protocol under a basis-point licensing model.
 
 > *Ditto's role in Canton DeFi is not just to operate a vault — it is to provide the verification layer that lets vaults, lending markets, and DEXes price assets and state safely on Canton.*
 
@@ -322,12 +386,13 @@ Markers fire only on Canton-native transactions: dvTokens are issued and traded 
 | **Phase 1 — MVP** | ✅ Complete | CIP-56 tokens, deposit/withdraw queues, PostgreSQL vault accounting, React UI, Docker, DevNet validator |
 | **Phase 2 — V2 Architecture** | ✅ Complete | Non-custodial only, party separation, metadata passthrough, transaction indexer, yield-based NAV, Loop wallet, admin dashboard |
 | **Phase 3 — Featured App** | 🟡 In progress | Tokenomics Committee review, Rule 9 prerequisites (Console wallet integration + DVP listing on CantonSwap or equivalent), `FeaturedAppRight` + `WalletUserProxy` integration, automated marker submission service, `NavAnchor` on-chain publication infrastructure, DAR vetting on global topology |
-| **Phase 4 — Strategy Router** | 🔵 Planned | Adapter framework, AlpendSupply + AlpendLooped + CantexLpHedged + CantexLpNaked, allocator + rebalancer, risk monitor |
-| **Phase 5 — DVN (Internal)** | 🔵 Planned | Operator-quorum attestation contracts, on-chain feed publication, vault router integration |
-| **Phase 6 — DVN (External)** | 🔵 Planned | Externalize feeds to Canton DeFi protocols, basis-point licensing model |
-| **Phase 7 — Vault Lineup Expansion** | 🔵 Planned | Additional vault products: `dvUSDCx-LOCK90`, `dvUSDCx-LOCK1Y`, `dvCC`, `dvCBTC`. Each its own CIP-56 instrument, fee schedule, and marker stream. |
-| **Phase 8 — Private Credit Tranche** | 🔵 Planned | SPV-wrapped credit fund tokens via dedicated locked-vault product (`dvUSDCx-LOCK1Y` with credit-fund strategy enabled), targeting illiquid double-digit yield |
-| **Phase 9 — Liquidity** | 🔵 Planned | Secondary market for dvTokens via CantonSwap / Silvana, cross-app composability, market-making to drive marker velocity |
+| **Phase 4 — Strategy Router** | 🔵 Planned | Adapter framework, AlpendSupply + AlpendLooped + CantexLpHedged + CantexLpNaked, allocator + rebalancer, risk monitor. Sub-phases 4a (manual integration) → 4b (semi-automated) → 4c (fully autonomous) reflect operator-integration maturity, not separate features. |
+| **Phase 5 — DVN (Internal)** | 🔵 Planned | Operator-quorum attestation contracts, on-chain feed publication, vault router integration, RWA NAV attestation primitives, cross-chain finality proofs |
+| **Phase 6 — Ethereum→Canton Inbound Onramp** | 🔵 Planned | Ditto solver network extended for EVM→Canton routes, solver inventory party, onramp deposit indexer, CCTP-class partner-onramp fallbacks, frontend onramp module. **Inbound only — no outbound path.** |
+| **Phase 7 — Vault Lineup Expansion (permissionless)** | 🔵 Planned | Additional permissionless vault products: `dvUSDCx-LOCK90`, `dvUSDCx-LOCK1Y`, `dvCC`, `dvCBTC`. Each its own CIP-56 instrument, fee schedule, and marker stream. |
+| **Phase 8 — KYC-Gated Tokenized Fund Marketplace** | 🔵 Planned | Per-fund SPV legal wrappers, KYC stack at signup, marketplace dvTokens for tokenized money-market (FOBXX, DLR), collateral / HQLA (HQLAX, TDS), and private-credit-fund SPVs. DVN-attested NAV pipeline. Subsumes the prior "Private Credit Tranche" phase. |
+| **Phase 9 — DVN (External)** | 🔵 Planned | Externalize DVN feeds to Canton DeFi protocols and tokenized fund issuers, basis-point licensing model |
+| **Phase 10 — Liquidity** | 🔵 Planned | Secondary market for dvTokens via CantonSwap / Silvana, cross-app composability, market-making to drive marker velocity |
 
 ---
 
